@@ -2,15 +2,16 @@
 
 use eframe::egui::{self, text::LayoutJob, Color32, FontId, Pos2, Rect, Rounding, Sense, Stroke, TextFormat, Vec2};
 use std::path::PathBuf;
+use std::process::Command;
 
 // Familiar post-it colours: (paper, ink)
 const NOTES: [(u32, u32); 6] = [
-    (0xFFF176, 0x4A4210), // canary yellow
-    (0xFF9EC4, 0x4F1A33), // pink
-    (0x9EE7F5, 0x103F4A), // aqua blue
-    (0xC5F28B, 0x2A4410), // lime green
-    (0xFFC27A, 0x4F2E0A), // orange
-    (0xD7B8FF, 0x35195A), // lavender
+    (0xFFEB3B, 0x4A3F00), // canary yellow
+    (0xFF6EB4, 0x4D0A2C), // neon pink
+    (0x4FD8FF, 0x00394D), // aqua blue
+    (0x8EE53F, 0x1E4000), // lime green
+    (0xFFA52E, 0x4D2600), // orange
+    (0xB78CFF, 0x2E0F66), // purple
 ];
 
 fn rgb(c: u32) -> Color32 {
@@ -29,6 +30,8 @@ struct App {
     path: Option<PathBuf>,
     color: usize,
     menu_open: bool,
+    prompt: Option<(bool, String)>, // fallback path prompt (save?, text)
+    grip_off: Vec2,
 }
 
 impl App {
@@ -38,9 +41,18 @@ impl App {
         s.visuals.selection.bg_fill = Color32::from_black_alpha(45);
         s.visuals.selection.stroke = Stroke::NONE;
         cc.egui_ctx.set_style(s);
-        let mut app = App { text: String::new(), path: None, color: seed() % NOTES.len(), menu_open: false };
-        if let Some(p) = std::env::args().nth(1) {
-            app.open(PathBuf::from(p));
+        let mut color = seed() % NOTES.len();
+        let mut file = None;
+        for a in std::env::args().skip(1) {
+            if let Some(n) = a.strip_prefix("--color=") {
+                color = n.parse::<usize>().unwrap_or(0) % NOTES.len();
+            } else {
+                file = Some(PathBuf::from(a));
+            }
+        }
+        let mut app = App { text: String::new(), path: None, color, menu_open: false, prompt: None, grip_off: Vec2::ZERO };
+        if let Some(p) = file {
+            app.open(p);
         }
         app
     }
@@ -52,21 +64,24 @@ impl App {
         }
     }
 
-    fn new_note(&mut self) {
-        self.text.clear();
-        self.path = None;
-        self.color = (self.color + 1) % NOTES.len();
+    fn new_note(&self) {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = Command::new(exe).arg(format!("--color={}", self.color + 1)).spawn();
+        }
     }
 
     fn save_as(&mut self) {
-        let d = rfd::FileDialog::new().add_filter("Markdown", &["md"]).set_file_name("note.md");
-        if let Some(mut p) = d.save_file() {
-            if p.extension().is_none() {
-                p.set_extension("md");
+        match pick(true) {
+            Pick::Path(mut p) => {
+                if p.extension().is_none() {
+                    p.set_extension("md");
+                }
+                if std::fs::write(&p, &self.text).is_ok() {
+                    self.path = Some(p);
+                }
             }
-            if std::fs::write(&p, &self.text).is_ok() {
-                self.path = Some(p);
-            }
+            Pick::NoTool => self.prompt = Some((true, "note.md".into())),
+            Pick::Cancel => {}
         }
     }
 
@@ -80,10 +95,41 @@ impl App {
     }
 
     fn load(&mut self) {
-        if let Some(p) = rfd::FileDialog::new().add_filter("Markdown / text", &["md", "markdown", "txt"]).pick_file() {
-            self.open(p);
+        match pick(false) {
+            Pick::Path(p) => self.open(p),
+            Pick::NoTool => self.prompt = Some((false, String::new())),
+            Pick::Cancel => {}
         }
     }
+}
+
+enum Pick {
+    Path(PathBuf),
+    NoTool,
+    Cancel,
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pick(save: bool) -> Pick {
+    let d = rfd::FileDialog::new().add_filter("Markdown", &["md", "markdown", "txt"]);
+    let r = if save { d.set_file_name("note.md").save_file() } else { d.pick_file() };
+    r.map_or(Pick::Cancel, Pick::Path)
+}
+
+// On Linux we use the desktop's own dialog tool: no extra libraries linked in.
+#[cfg(target_os = "linux")]
+fn pick(save: bool) -> Pick {
+    let tries: [(&str, Vec<&str>); 2] = [
+        ("zenity", if save { vec!["--file-selection", "--save", "--confirm-overwrite", "--filename=note.md"] } else { vec!["--file-selection"] }),
+        ("kdialog", if save { vec!["--getsavefilename", "note.md"] } else { vec!["--getopenfilename", "."] }),
+    ];
+    for (bin, args) in tries {
+        if let Ok(o) = Command::new(bin).args(args).output() {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            return if o.status.success() && !s.is_empty() { Pick::Path(PathBuf::from(s)) } else { Pick::Cancel };
+        }
+    }
+    Pick::NoTool
 }
 
 // Light markdown styling: bigger headings, dimmed quotes and code.
@@ -196,14 +242,15 @@ impl eframe::App for App {
                     Stroke::new(1.2, ink.gamma_multiply(0.5)),
                 );
             }
-            if cfg!(target_os = "macos") {
-                // winit can't start a native resize on macOS, so resize manually
-                if gr.dragged() {
-                    let s = full.size() + gr.drag_delta();
+            if gr.drag_started() {
+                let p = ctx.pointer_interact_pos().unwrap_or(full.max);
+                self.grip_off = full.max - p;
+            }
+            if gr.dragged() {
+                if let Some(p) = ctx.pointer_latest_pos() {
+                    let s = (p + self.grip_off) - full.min;
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(s.x.max(200.0), s.y.max(160.0))));
                 }
-            } else if gr.drag_started() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(egui::viewport::ResizeDirection::SouthEast));
             }
         });
 
@@ -214,11 +261,11 @@ impl eframe::App for App {
                 .fixed_pos(Pos2::new(8.0, 34.0))
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
-                    egui::Frame::popup(ui.style()).rounding(Rounding::same(10.0)).fill(Color32::from_rgb(0xFA, 0xFA, 0xFA)).show(ui, |ui| {
+                    egui::Frame::none().rounding(Rounding::same(8.0)).fill(Color32::from_rgb((paper.r() as f32 * 0.9) as u8, (paper.g() as f32 * 0.9) as u8, (paper.b() as f32 * 0.9) as u8)).stroke(Stroke::new(1.0, ink.gamma_multiply(0.35))).inner_margin(4.0).show(ui, |ui| {
                         ui.set_min_width(130.0);
-                        ui.style_mut().visuals.widgets.hovered.weak_bg_fill = Color32::from_black_alpha(18);
+                        ui.style_mut().visuals.widgets.hovered.weak_bg_fill = Color32::from_black_alpha(30);
                         for (i, label) in ["New file", "Load file", "Save as"].iter().enumerate() {
-                            let b = egui::Button::new(egui::RichText::new(*label).color(Color32::from_rgb(0x24, 0x24, 0x24)))
+                            let b = egui::Button::new(egui::RichText::new(*label).color(ink))
                                 .frame(false)
                                 .min_size(Vec2::new(130.0, 26.0));
                             if ui.add(b).clicked() {
@@ -238,6 +285,31 @@ impl eframe::App for App {
                 2 => self.load(),
                 3 => self.save_as(),
                 _ => {}
+            }
+        }
+
+        // Fallback when no dialog tool exists (Linux without zenity/kdialog)
+        if let Some((save, mut txt)) = self.prompt.take() {
+            let mut keep = true;
+            egui::Area::new(egui::Id::new("prompt")).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -22.0]).show(ctx, |ui| {
+                let r = ui.add(egui::TextEdit::singleline(&mut txt).hint_text(if save { "save to path, Enter" } else { "open path, Enter" }).desired_width(240.0).text_color(ink));
+                r.request_focus();
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    keep = false;
+                } else if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    keep = false;
+                    let p = PathBuf::from(txt.trim());
+                    if save {
+                        if std::fs::write(&p, &self.text).is_ok() {
+                            self.path = Some(p);
+                        }
+                    } else {
+                        self.open(p);
+                    }
+                }
+            });
+            if keep {
+                self.prompt = Some((save, txt));
             }
         }
     }

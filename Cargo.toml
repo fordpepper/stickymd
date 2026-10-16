@@ -5,10 +5,12 @@ edition = "2021"
 
 [dependencies]
 eframe = { version = "=0.27.2", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
-rfd = { version = "0.14", default-features = false, features = ["xdg-portal", "async-std"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+rfd = { version = "0.14", default-features = false }
 
 [profile.release]
-opt-level = "s"
+opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
