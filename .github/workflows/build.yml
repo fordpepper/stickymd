@@ -1,0 +1,50 @@
+name: build
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: tar -C target/release -czf stickymd-linux.tar.gz stickymd
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: Copy-Item target/release/stickymd.exe stickymd-windows.exe
+
+      - name: Package (macOS .app)
+        if: runner.os == 'macOS'
+        run: |
+          APP=StickyMD.app
+          mkdir -p $APP/Contents/MacOS
+          cp target/release/stickymd $APP/Contents/MacOS/stickymd
+          cat > $APP/Contents/Info.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>StickyMD</string>
+            <key>CFBundleExecutable</key><string>stickymd</string>
+            <key>CFBundleIdentifier</key><string>local.stickymd</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          ditto -c -k --keepParent $APP stickymd-macos.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stickymd-${{ runner.os }}
+          path: |
+            stickymd-linux.tar.gz
+            stickymd-windows.exe
+            stickymd-macos.zip
+          if-no-files-found: ignore
